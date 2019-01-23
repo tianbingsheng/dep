@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"github.com/armon/go-radix"
+	"github.com/golang/dep/gps/internal/bitbucketapi"
 	"github.com/pkg/errors"
 )
 
@@ -167,44 +168,65 @@ func (m bitbucketDeducer) deduceRoot(path string) (string, error) {
 	return "bitbucket.org" + v[2], nil
 }
 
+func getBitbucketRepo(s string) (string, error) {
+	ss := strings.Split(s, "/")
+	if len(ss) < 3 {
+		return "", errors.Errorf("bitbucket repo path %q appears malformed", s)
+	}
+
+	return ss[1] + "/" + ss[2], nil
+}
+
 func (m bitbucketDeducer) deduceSource(path string, u *url.URL) (maybeSources, error) {
 	v := m.regexp.FindStringSubmatch(path)
 	if v == nil {
 		return nil, fmt.Errorf("%s is not a valid path for a source on bitbucket.org", path)
 	}
 
+	bbRepo, err := getBitbucketRepo(v[2])
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to extract repo from bitbucket URL")
+	}
+
+	scm, err := bitbucketapi.GetSCM(bbRepo)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get SCM details from bitbucket repo")
+	}
+
+	isgit := scm == "git"
+
 	u.Host = "bitbucket.org"
 	u.Path = v[2]
 
-	// This isn't definitive, but it'll probably catch most
-	isgit := strings.HasSuffix(u.Path, ".git") || (u.User != nil && u.User.Username() == "git")
-	ishg := strings.HasSuffix(u.Path, ".hg") || (u.User != nil && u.User.Username() == "hg")
+	// // This isn't definitive, but it'll probably catch most
+	// isgit := strings.HasSuffix(u.Path, ".git") || (u.User != nil && u.User.Username() == "git")
+	// ishg := strings.HasSuffix(u.Path, ".hg") || (u.User != nil && u.User.Username() == "hg")
 
-	// TODO(sdboyer) resolve scm ambiguity if needed by querying bitbucket's REST API
-	if u.Scheme != "" {
-		validgit, validhg := validateVCSScheme(u.Scheme, "git"), validateVCSScheme(u.Scheme, "hg")
-		if isgit {
-			if !validgit {
-				// This is unreachable for now, as the git schemes are a
-				// superset of the hg schemes
-				return nil, fmt.Errorf("%s is not a valid scheme for accessing a git repository", u.Scheme)
-			}
-			return maybeSources{maybeGitSource{url: u}}, nil
-		} else if ishg {
-			if !validhg {
-				return nil, fmt.Errorf("%s is not a valid scheme for accessing an hg repository", u.Scheme)
-			}
-			return maybeSources{maybeHgSource{url: u}}, nil
-		} else if !validgit && !validhg {
-			return nil, fmt.Errorf("%s is not a valid scheme for accessing either a git or hg repository", u.Scheme)
-		}
+	// // TODO(sdboyer) resolve scm ambiguity if needed by querying bitbucket's REST API
+	// if u.Scheme != "" {
+	// 	validgit, validhg := validateVCSScheme(u.Scheme, "git"), validateVCSScheme(u.Scheme, "hg")
+	// 	if isgit {
+	// 		if !validgit {
+	// 			// This is unreachable for now, as the git schemes are a
+	// 			// superset of the hg schemes
+	// 			return nil, fmt.Errorf("%s is not a valid scheme for accessing a git repository", u.Scheme)
+	// 		}
+	// 		return maybeSources{maybeGitSource{url: u}}, nil
+	// 	} else if ishg {
+	// 		if !validhg {
+	// 			return nil, fmt.Errorf("%s is not a valid scheme for accessing an hg repository", u.Scheme)
+	// 		}
+	// 		return maybeSources{maybeHgSource{url: u}}, nil
+	// 	} else if !validgit && !validhg {
+	// 		return nil, fmt.Errorf("%s is not a valid scheme for accessing either a git or hg repository", u.Scheme)
+	// 	}
 
-		// No other choice, make an option for both git and hg
-		return maybeSources{
-			maybeHgSource{url: u},
-			maybeGitSource{url: u},
-		}, nil
-	}
+	// 	// No other choice, make an option for both git and hg
+	// 	return maybeSources{
+	// 		maybeHgSource{url: u},
+	// 		maybeGitSource{url: u},
+	// 	}, nil
+	// }
 
 	mb := make(maybeSources, 0)
 	// git is probably more common, even on bitbucket. however, bitbucket
@@ -220,9 +242,7 @@ func (m bitbucketDeducer) deduceSource(path string, u *url.URL) (maybeSources, e
 			u2.Scheme = scheme
 			mb = append(mb, maybeHgSource{url: &u2})
 		}
-	}
-
-	if !ishg {
+	} else {
 		for _, scheme := range gitSchemes {
 			u2 := *u
 			if scheme == "ssh" {
